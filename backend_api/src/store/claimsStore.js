@@ -3,6 +3,9 @@ const { randomUUID } = require('crypto');
 /**
  * Simple in-memory persistence for claims and related fraud analysis.
  * NOTE: This store resets on server restart.
+ *
+ * DEPRECATED: The app now persists to Supabase via src/store/claimsRepository.js.
+ * This file is retained for reference but should not be used by controllers.
  */
 
 /**

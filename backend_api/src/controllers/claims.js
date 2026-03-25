@@ -1,4 +1,4 @@
-const claimsStore = require('../store/claimsStore');
+const claimsRepository = require('../store/claimsRepository');
 const { parseClaimsCsv } = require('../services/csvService');
 const fraudService = require('../services/fraudService');
 
@@ -13,106 +13,158 @@ function buildProviderHighValueCounts(claims) {
   return counts;
 }
 
+function isSupabaseConfigError(err) {
+  return Boolean(err && typeof err.message === 'string' && err.message.toLowerCase().includes('supabase is not configured'));
+}
+
 class ClaimsController {
   /**
    * PUBLIC_INTERFACE
    * Upload CSV of claims. Accepts multipart/form-data with field "file".
    */
-  uploadClaims(req, res) {
-    if (!req.file || !req.file.buffer) {
-      return res.status(400).json({ error: 'Missing file. Upload multipart/form-data with field name "file".' });
-    }
+  async uploadClaims(req, res) {
+    try {
+      if (!req.file || !req.file.buffer) {
+        return res.status(400).json({ error: 'Missing file. Upload multipart/form-data with field name "file".' });
+      }
 
-    const { claims, errors, meta } = parseClaimsCsv(req.file.buffer);
-    if (errors.length) {
-      return res.status(400).json({
-        error: 'CSV validation failed',
-        details: { errors, meta },
+      const { claims, errors, meta } = parseClaimsCsv(req.file.buffer);
+      if (errors.length) {
+        return res.status(400).json({
+          error: 'CSV validation failed',
+          details: { errors, meta },
+        });
+      }
+
+      // Persist first
+      const upsertResult = await claimsRepository.bulkUpsert(claims);
+
+      // Score persisted claims and write fraud field back
+      const allClaims = await claimsRepository.listClaims({});
+      const providerCounts = buildProviderHighValueCounts(allClaims);
+
+      const scored = await Promise.all(
+        upsertResult.claims.map((c) => {
+          const fraud = fraudService.scoreClaim(c, { providerHighValueCounts: providerCounts });
+          // Persist fraud assessment to DB
+          return claimsRepository.updateClaim(c.id, { fraud });
+        })
+      );
+
+      return res.status(200).json({
+        status: 'ok',
+        meta,
+        created: upsertResult.created,
+        updated: upsertResult.updated,
+        count: scored.length,
+        claims: scored,
       });
+    } catch (err) {
+      if (isSupabaseConfigError(err)) {
+        return res.status(500).json({
+          error: 'Supabase not configured',
+          message: err.message,
+        });
+      }
+      // Let global middleware handle unexpected errors
+      throw err;
     }
-
-    // Persist first
-    const upsertResult = claimsStore.bulkUpsert(claims);
-
-    // Score persisted claims and write fraud field back
-    const allClaims = claimsStore.listClaims({});
-    const providerCounts = buildProviderHighValueCounts(allClaims);
-
-    const scored = upsertResult.claims.map((c) => {
-      const fraud = fraudService.scoreClaim(c, { providerHighValueCounts: providerCounts });
-      return claimsStore.updateClaim(c.id, { fraud });
-    });
-
-    return res.status(200).json({
-      status: 'ok',
-      meta,
-      created: upsertResult.created,
-      updated: upsertResult.updated,
-      count: scored.length,
-      claims: scored,
-    });
   }
 
   /**
    * PUBLIC_INTERFACE
    * List claims with optional query filters: q, status, minFraudScore.
    */
-  list(req, res) {
-    const minFraudScore = req.query.minFraudScore !== undefined ? Number(req.query.minFraudScore) : undefined;
-    const filters = {
-      q: req.query.q,
-      status: req.query.status,
-      minFraudScore: Number.isFinite(minFraudScore) ? minFraudScore : undefined,
-    };
-    const claims = claimsStore.listClaims(filters);
-    return res.status(200).json({ claims, count: claims.length });
+  async list(req, res) {
+    try {
+      const minFraudScore = req.query.minFraudScore !== undefined ? Number(req.query.minFraudScore) : undefined;
+      const filters = {
+        q: req.query.q,
+        status: req.query.status,
+        minFraudScore: Number.isFinite(minFraudScore) ? minFraudScore : undefined,
+      };
+      const claims = await claimsRepository.listClaims(filters);
+      return res.status(200).json({ claims, count: claims.length });
+    } catch (err) {
+      if (isSupabaseConfigError(err)) {
+        return res.status(500).json({ error: 'Supabase not configured', message: err.message });
+      }
+      throw err;
+    }
   }
 
   /**
    * PUBLIC_INTERFACE
    * Get a claim by id.
    */
-  getById(req, res) {
-    const claim = claimsStore.getClaim(req.params.id);
-    if (!claim) return res.status(404).json({ error: 'Claim not found' });
-    return res.status(200).json(claim);
+  async getById(req, res) {
+    try {
+      const claim = await claimsRepository.getClaim(req.params.id);
+      if (!claim) return res.status(404).json({ error: 'Claim not found' });
+      return res.status(200).json(claim);
+    } catch (err) {
+      if (isSupabaseConfigError(err)) {
+        return res.status(500).json({ error: 'Supabase not configured', message: err.message });
+      }
+      throw err;
+    }
   }
 
   /**
    * PUBLIC_INTERFACE
    * Update a claim by id (basic patch semantics).
    */
-  updateById(req, res) {
-    const patch = req.body || {};
-    const updated = claimsStore.updateClaim(req.params.id, patch);
-    if (!updated) return res.status(404).json({ error: 'Claim not found' });
-    return res.status(200).json(updated);
+  async updateById(req, res) {
+    try {
+      const patch = req.body || {};
+      const updated = await claimsRepository.updateClaim(req.params.id, patch);
+      if (!updated) return res.status(404).json({ error: 'Claim not found' });
+      return res.status(200).json(updated);
+    } catch (err) {
+      if (isSupabaseConfigError(err)) {
+        return res.status(500).json({ error: 'Supabase not configured', message: err.message });
+      }
+      throw err;
+    }
   }
 
   /**
    * PUBLIC_INTERFACE
    * Delete a claim by id.
    */
-  deleteById(req, res) {
-    const ok = claimsStore.deleteClaim(req.params.id);
-    if (!ok) return res.status(404).json({ error: 'Claim not found' });
-    return res.status(204).send();
+  async deleteById(req, res) {
+    try {
+      const ok = await claimsRepository.deleteClaim(req.params.id);
+      if (!ok) return res.status(404).json({ error: 'Claim not found' });
+      return res.status(204).send();
+    } catch (err) {
+      if (isSupabaseConfigError(err)) {
+        return res.status(500).json({ error: 'Supabase not configured', message: err.message });
+      }
+      throw err;
+    }
   }
 
   /**
    * PUBLIC_INTERFACE
    * Update outcome for a claim.
    */
-  updateOutcome(req, res) {
-    const { id, outcome, notes } = req.body || {};
-    if (!id || !outcome) {
-      return res.status(400).json({ error: 'Missing required fields: id, outcome' });
+  async updateOutcome(req, res) {
+    try {
+      const { id, outcome, notes } = req.body || {};
+      if (!id || !outcome) {
+        return res.status(400).json({ error: 'Missing required fields: id, outcome' });
+      }
+      const updated = await claimsRepository.updateOutcome({ id, outcome, notes });
+      if (!updated) return res.status(404).json({ error: 'Claim not found' });
+      return res.status(200).json(updated);
+    } catch (err) {
+      if (isSupabaseConfigError(err)) {
+        return res.status(500).json({ error: 'Supabase not configured', message: err.message });
+      }
+      throw err;
     }
-    const updated = claimsStore.updateOutcome({ id, outcome, notes });
-    if (!updated) return res.status(404).json({ error: 'Claim not found' });
-    return res.status(200).json(updated);
   }
 }
 
 module.exports = new ClaimsController();
-

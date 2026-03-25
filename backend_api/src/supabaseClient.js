@@ -1,4 +1,4 @@
-const { createClient } = require("@supabase/supabase-js");
+const { createClient } = require('@supabase/supabase-js');
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -13,7 +13,7 @@ const supabase =
 function requireSupabaseAdmin() {
   if (!supabase) {
     throw new Error(
-      "Supabase is not configured for backend. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in backend_api/.env"
+      'Supabase is not configured for backend. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in backend_api/.env'
     );
   }
   return supabase;

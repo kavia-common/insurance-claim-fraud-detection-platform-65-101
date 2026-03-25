@@ -1,4 +1,4 @@
-const claimsStore = require('../store/claimsStore');
+const claimsRepository = require('../store/claimsRepository');
 const fraudService = require('../services/fraudService');
 
 function buildProviderHighValueCounts(claims) {
@@ -12,39 +12,53 @@ function buildProviderHighValueCounts(claims) {
   return counts;
 }
 
+function isSupabaseConfigError(err) {
+  return Boolean(err && typeof err.message === 'string' && err.message.toLowerCase().includes('supabase is not configured'));
+}
+
 class FraudController {
   /**
    * PUBLIC_INTERFACE
    * Score fraud for a claim. Accepts either { claimId } or { claim: {...} }.
    */
-  scoreFraud(req, res) {
-    const body = req.body || {};
-    let claim = null;
+  async scoreFraud(req, res) {
+    try {
+      const body = req.body || {};
+      let claim = null;
 
-    if (body.claimId) {
-      claim = claimsStore.getClaim(String(body.claimId));
-      if (!claim) return res.status(404).json({ error: 'Claim not found' });
-    } else if (body.id) {
-      claim = claimsStore.getClaim(String(body.id));
-      if (!claim) return res.status(404).json({ error: 'Claim not found' });
-    } else if (body.claim && typeof body.claim === 'object') {
-      claim = body.claim;
-    } else {
-      return res.status(400).json({ error: 'Provide claimId (or id) or claim payload.' });
+      if (body.claimId) {
+        claim = await claimsRepository.getClaim(String(body.claimId));
+        if (!claim) return res.status(404).json({ error: 'Claim not found' });
+      } else if (body.id) {
+        claim = await claimsRepository.getClaim(String(body.id));
+        if (!claim) return res.status(404).json({ error: 'Claim not found' });
+      } else if (body.claim && typeof body.claim === 'object') {
+        claim = body.claim;
+      } else {
+        return res.status(400).json({ error: 'Provide claimId (or id) or claim payload.' });
+      }
+
+      const allClaims = await claimsRepository.listClaims({});
+      const providerCounts = buildProviderHighValueCounts(allClaims);
+
+      const fraud = fraudService.scoreClaim(claim, { providerHighValueCounts: providerCounts });
+
+      // If claim exists in DB, persist fraud results
+      if (claim.id) {
+        const existing = await claimsRepository.getClaim(claim.id);
+        if (existing) {
+          const updated = await claimsRepository.updateClaim(claim.id, { fraud });
+          return res.status(200).json({ claim: updated, fraud });
+        }
+      }
+
+      return res.status(200).json({ fraud });
+    } catch (err) {
+      if (isSupabaseConfigError(err)) {
+        return res.status(500).json({ error: 'Supabase not configured', message: err.message });
+      }
+      throw err;
     }
-
-    const allClaims = claimsStore.listClaims({});
-    const providerCounts = buildProviderHighValueCounts(allClaims);
-
-    const fraud = fraudService.scoreClaim(claim, { providerHighValueCounts: providerCounts });
-
-    // If claim exists in store, persist fraud results
-    if (claim.id && claimsStore.getClaim(claim.id)) {
-      const updated = claimsStore.updateClaim(claim.id, { fraud });
-      return res.status(200).json({ claim: updated, fraud });
-    }
-
-    return res.status(200).json({ fraud });
   }
 
   /**
@@ -59,12 +73,18 @@ class FraudController {
    * PUBLIC_INTERFACE
    * Return high-risk queue (claims with high risk tier).
    */
-  highRiskQueue(req, res) {
-    const claims = claimsStore.listClaims({});
-    const high = claims.filter((c) => (c.fraud?.riskTier || 'low') === 'high');
-    return res.status(200).json({ claims: high, count: high.length });
+  async highRiskQueue(req, res) {
+    try {
+      const claims = await claimsRepository.listClaims({});
+      const high = claims.filter((c) => (c.fraud?.riskTier || 'low') === 'high');
+      return res.status(200).json({ claims: high, count: high.length });
+    } catch (err) {
+      if (isSupabaseConfigError(err)) {
+        return res.status(500).json({ error: 'Supabase not configured', message: err.message });
+      }
+      throw err;
+    }
   }
 }
 
 module.exports = new FraudController();
-
